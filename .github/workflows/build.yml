@@ -1,0 +1,144 @@
+name: Build
+
+on:
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: '3.10'
+  POETRY_VERSION: '1.7'
+  NODE_VERSION: '20'
+  PNPM_VERSION: '8'
+
+  REPOSITORY_WEB: ${{ vars.REPOSITORY_WEB }}
+  REPOSITORY_SERVER: ${{ vars.REPOSITORY_SERVER }}
+  SERVER_PACKAGE_NAME: ${{ vars.SERVER_PACKAGE_NAME }}
+
+  DOCKER_REGISTRY: ${{ vars.DOCKER_REGISTRY }}
+  DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+  DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+  DOCKER_IMAGE_TAG: ${{ vars.DOCKER_IMAGE_TAG }}
+
+  # ref: https://nuitka.net/doc/user-manual.html#control-where-caches-live
+  NUITKA_CACHE_DIR: ${{ github.workspace }}/.nuitk-cache
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Init Settings
+        # language="Shell Script"
+        run: |
+          set_default_env_var() { if [ -z "${!1}" ]; then echo "$1=$2" >> $GITHUB_ENV; fi }
+          set_default_env_var 'REPOSITORY_WEB' 'MuXiu1997/media-symlink-manager-web'
+          set_default_env_var 'REPOSITORY_SERVER' 'MuXiu1997/media-symlink-manager-server'
+          set_default_env_var 'SERVER_PACKAGE_NAME' 'media_symlink_manager_server'
+          set_default_env_var 'DOCKER_REGISTRY' 'ghcr.io'
+          set_default_env_var 'DOCKER_USERNAME' '${{ github.actor }}'
+          set_default_env_var 'DOCKER_PASSWORD' '${{ secrets.GITHUB_TOKEN }}'
+          set_default_env_var 'DOCKER_IMAGE_TAG' 'ghcr.io/muxiu1997/media-symlink-manager:latest'
+
+      - name: Checkout Web
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REPOSITORY_WEB }}
+          path: web
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+      - name: Get Web SHA
+        run: echo "WEB_SHA=$(git rev-parse HEAD)" >> $GITHUB_ENV
+        working-directory: web
+      - name: Web Cache
+        id: web-cache
+        uses: actions/cache@v3
+        with:
+          path: web/dist
+          key: ${{ runner.os }}-web-${{ env.WEB_SHA }}
+
+      - name: Checkout Server
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.REPOSITORY_SERVER }}
+          path: server
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+      - name: Get Server SHA
+        run: echo "SERVER_SHA=$(git rev-parse HEAD)" >> $GITHUB_ENV
+        working-directory: server
+
+      # region Ensure Python Dependencies
+      - name: Install poetry
+        run: pipx install poetry==${{ env.POETRY_VERSION }}
+      - name: Setup Python
+        id: setup-python
+        uses: actions/setup-python@v3
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'poetry'
+          cache-dependency-path: '**/poetry.lock'
+      - name: Install Python Dependencies
+        run: poetry install --without dev
+        working-directory: server
+      # endregion Ensure Python Dependencies
+
+      # region Ensure Node Dependencies
+      - name: Setup Pnpm
+        if: steps.web-cache.outputs.cache-hit != 'true'
+        uses: pnpm/action-setup@v2
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - name: Setup Node
+        if: steps.web-cache.outputs.cache-hit != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'pnpm'
+          cache-dependency-path: '**/pnpm-lock.yaml'
+      - name: Install Node Dependencies
+        if: steps.web-cache.outputs.cache-hit != 'true'
+        run: pnpm install
+        working-directory: web
+      # endregion Ensure Node Dependencies
+
+      # region Build
+      - name: Build Web
+        if: steps.web-cache.outputs.cache-hit != 'true'
+        run: pnpm run build
+        working-directory: web
+
+      - name: Copy Web Dist
+        run: |
+          mkdir -p server/src/$SERVER_PACKAGE_NAME/statics
+          cp -r web/dist/* server/src/$SERVER_PACKAGE_NAME/statics
+
+      - name: Setup Ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+      - name: Setup Nuitka Cache
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.NUITKA_CACHE_DIR }}
+          key: ${{ runner.os }}-nuitka-${{ env.SERVER_SHA }}
+          restore-keys: |
+            ${{ runner.os }}-nuitka
+      - name: Build Server
+        run: poetry run build
+        working-directory: server
+      # endregion Build
+
+      # region Docker
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKER_REGISTRY }}
+          username: ${{ env.DOCKER_USERNAME }}
+          password: ${{ env.DOCKER_PASSWORD }}
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: server
+          file: server/Dockerfile
+          push: true
+          tags: ${{ env.DOCKER_IMAGE_TAG }}
