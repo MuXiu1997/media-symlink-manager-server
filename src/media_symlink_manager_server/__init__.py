@@ -6,7 +6,7 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.staticfiles import StaticFiles
 
 from media_symlink_manager_server.dependencies import setup_db_from_env
-from media_symlink_manager_server.routers import tv, fs
+from media_symlink_manager_server.routers import tv, fs, settings
 
 
 @asynccontextmanager
@@ -22,4 +22,5 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 app.include_router(tv.router, prefix="/api")
 app.include_router(fs.router, prefix="/api")
+app.include_router(settings.router, prefix="/api")
 app.mount("/", StaticFiles(packages=[__name__], html=True))
