@@ -41,7 +41,7 @@ jobs:
           set_default_env_var 'DOCKER_REGISTRY' 'ghcr.io'
           set_default_env_var 'DOCKER_USERNAME' '${{ github.actor }}'
           set_default_env_var 'DOCKER_PASSWORD' '${{ secrets.GITHUB_TOKEN }}'
-          set_default_env_var 'DOCKER_IMAGE_TAG' 'ghcr.io/muxiu1997/media-symlink-manager:latest'
+          set_default_env_var 'DOCKER_IMAGE_TAG' "ghcr.io/muxiu1997/media-symlink-manager:$(date +'%Y-%m-%d')"
 
       - name: Checkout Web
         uses: actions/checkout@v4
