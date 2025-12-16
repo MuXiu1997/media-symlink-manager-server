@@ -1,4 +1,5 @@
 import os
+from dataclasses import dataclass
 from typing import List, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -98,33 +99,120 @@ async def apply(tmdb_id: int) -> None:
             headers={"X-Error": "Not Found", "Access-Control-Expose-Headers": "X-Error"},
         )
 
+    apply_tv_symlinks(tv)
+
+
+# region Helper functions
+@dataclass
+class SymlinkTask:
+    """Represents a symlink creation task."""
+    src: str  # Source file path
+    dst: str  # Destination symlink path
+
+
+class SymlinkBatchError(Exception):
+    """Raised when batch symlink creation fails due to file conflicts."""
+    def __init__(self, conflicts: List[str]):
+        self.conflicts = conflicts
+        super().__init__(f"Files already exist: {conflicts}")
+
+
+def create_symlinks_atomic(tasks: List[SymlinkTask]) -> None:
+    """
+    Atomically create symlinks in batch.
+
+    - Fails if any target path is a regular file (non-symlink)
+    - Allows overwriting symlinks or creating new ones
+
+    Args:
+        tasks: List of symlink creation tasks
+
+    Raises:
+        SymlinkBatchError: When regular file conflicts are detected
+    """
+    # Phase 1: Validate all target paths
+    conflicts = []
+    for task in tasks:
+        if os.path.lexists(task.dst) and not os.path.islink(task.dst):
+            conflicts.append(task.dst)
+
+    if conflicts:
+        raise SymlinkBatchError(conflicts)
+
+    # Phase 2: Execute all symlink operations
+    created = []
+    try:
+        for task in tasks:
+            # Ensure destination directory exists
+            dst_dir = os.path.dirname(task.dst)
+            if dst_dir:
+                os.makedirs(dst_dir, exist_ok=True)
+
+            # Remove existing symlink
+            if os.path.islink(task.dst):
+                os.remove(task.dst)
+
+            # Create new symlink
+            os.symlink(task.src, task.dst)
+            created.append(task.dst)
+    except OSError:
+        # Rollback created symlinks
+        for dst in created:
+            try:
+                if os.path.islink(dst):
+                    os.remove(dst)
+            except OSError:
+                pass
+        raise
+
+
+def apply_tv_symlinks(tv: Tv) -> None:
+    """
+    Apply TV show symlinks based on filepath mapping.
+
+    Args:
+        tv: Tv object
+
+    Raises:
+        HTTPException: 409 when file conflicts are detected
+    """
     base_dir = tv.filepath_mapping["base_dir"]
     mappings = tv.filepath_mapping["mappings"]
-
     tv_dirname = avoid_invalid_filename_chars(f"{tv.name} ({tv.year})")
+
+    # Collect all symlink tasks
+    tasks: List[SymlinkTask] = []
+
     for season in tv.tmdb_seasons:
         season_dirname = f"Season {season['season_number']:02d}"
         season_dirpath = os.path.join(base_dir, tv_dirname, season_dirname)
-        os.makedirs(season_dirpath, exist_ok=True)
+
         for episode in season["episodes"]:
             key = get_episode_key(episode)
-            src = mappings[key]
+            src = mappings.get(key, "")
             if src == "":
                 continue
+
             ext = os.path.splitext(src)[1]
             dst = os.path.join(
                 season_dirpath,
                 avoid_invalid_filename_chars(f"{tv.name} ({tv.year}) - {key} - {episode['name']}{ext}"),
             )
-            # TODO 校验 src 是否存在
-            # TODO 校验是否覆盖
-            if os.path.exists(dst):
-                os.remove(dst)
+            tasks.append(SymlinkTask(src=src, dst=dst))
 
-            os.symlink(src, dst)
+    # Execute atomically
+    try:
+        create_symlinks_atomic(tasks)
+    except SymlinkBatchError as e:
+        raise HTTPException(
+            status_code=409,
+            headers={
+                "X-Error": f"Files already exist: {', '.join(e.conflicts)}",
+                "Access-Control-Expose-Headers": "X-Error",
+            },
+        )
 
 
-# region Helper functions
 def search_tmdb_tv_all_page(tmdb_client: TmdbClient, query: str) -> List[RequestSearchTv.FieldResultsItem]:
     results: List[RequestSearchTv.FieldResultsItem] = list()
     page = 1
